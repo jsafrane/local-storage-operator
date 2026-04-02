@@ -49,7 +49,7 @@ spec:
             Local Storage operator has observed that pv {{ $labels.persistent_volume }} does not
             have a stable device-path in /dev/disk/by-id/ that it can use and hence it may be using
             device paths which may change on reboot. Such device paths should be used carefully.
-          message: "LSO has detected pv {{ $labels.persistent_volume }} without any valid stable path"
+          message: "Local volume represented by PersistentVolume {{ $labels.persistent_volume }} does not have any valid stable path"
           description: |
             Local Storage operator has observed that pv {{ $labels.persistent_volume }} does not
             have a stable device-path in /dev/disk/by-id/ that it can use and hence it may be using
@@ -65,7 +65,7 @@ spec:
           summary: |
             Local Storage operator has observed that pv {{ $labels.persistent_volume }} does not
             have matching symlink it should be using vs symlink LSO prefers it to use for stability between reboots and OS upgrade.
-          message: "LSO has detected pv {{ $labels.persistent_volume }} with symlink mismatch"
+          message: "Local volume represented by PersistentVolume {{ $labels.persistent_volume }} uses a sub-optimal device symlink"
           description: |
             Local Storage operator has observed that pv {{ $labels.persistent_volume }} is using a symlink
             that is not optimum for stability between reboots and OS upgrades. Consider updating

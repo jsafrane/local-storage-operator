@@ -17,6 +17,11 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/manager"
 )
 
+// LocalVolumeDeviceLinkCache maintains an in-memory index of LocalVolumeDeviceLink
+// objects keyed by their valid link targets (e.g. /dev/disk/by-id paths). Reconcilers
+// use this cache to recover device-to-PV associations when the on-disk symlink has
+// been lost (e.g. after a node reboot changes /dev/disk/by-id entries), enabling
+// symlink recreation without re-provisioning the PersistentVolume.
 type LocalVolumeDeviceLinkCache struct {
 	mu     sync.RWMutex
 	client client.Client
