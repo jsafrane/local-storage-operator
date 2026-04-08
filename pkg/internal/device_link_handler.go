@@ -7,7 +7,6 @@ import (
 	"os"
 	"path/filepath"
 	"reflect"
-	"strings"
 
 	operatorv1 "github.com/openshift/api/operator/v1"
 	v1 "github.com/openshift/local-storage-operator/api/v1"
@@ -19,10 +18,8 @@ import (
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/types"
-	"k8s.io/apimachinery/pkg/util/sets"
 	"k8s.io/client-go/tools/record"
 	"k8s.io/klog/v2"
-	utilexec "k8s.io/utils/exec"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 )
 
@@ -191,12 +188,12 @@ func (dl *DeviceLinkHandler) setStatusSymlinks(lvdl *v1.LocalVolumeDeviceLink, b
 	}
 	klog.V(2).Infof("updating lvdl with currentSymlink: %s, preferredSymlink: %s, devicePath: %s, kname: %s", currentSymlink, preferredLinkTarget, devicePath, blockDevice.KName)
 
-	validLinks, err := dl.getValidByIDSymlinks(blockDevice.KName)
+	validLinks, err := blockDevice.GetValidByIDSymlinks()
 	if err != nil {
 		return lvdl, err
 	}
 
-	filesystemUUID, err := getFilesystemUUID(devicePath)
+	filesystemUUID, err := blockDevice.GetFilesystemUUID()
 	if err != nil {
 		return lvdl, err
 	}
@@ -244,41 +241,6 @@ func (dl *DeviceLinkHandler) findOrCreateLVDL(ctx context.Context, pvName, names
 		return nil, fmt.Errorf("error creating lvdl object %s, for device %s: %w", pvName, devicePath, err)
 	}
 	return existing, nil
-}
-
-func (dl *DeviceLinkHandler) getValidByIDSymlinks(kname string) ([]string, error) {
-	paths, err := FilePathGlob(DiskByIDDir + "*")
-	if err != nil {
-		return nil, err
-	}
-
-	matches := sets.New[string]()
-
-	for _, path := range paths {
-		isMatch, err := PathEvalsToDiskLabel(path, kname)
-		if err != nil {
-			return nil, err
-		}
-		if isMatch {
-			matches.Insert(path)
-		}
-	}
-
-	return sets.List(matches), nil
-}
-
-func getFilesystemUUID(devicePath string) (string, error) {
-	klog.InfoS("trying to get filesystem information", "devicePath", devicePath)
-	cmd := CmdExecutor.Command("blkid", "-s", "UUID", "-o", "value", devicePath)
-	output, err := executeCmdWithCombinedOutput(cmd)
-	if err != nil {
-		// blkid returns 2 when no UUID is found for the device.
-		if exitErr, ok := err.(utilexec.ExitError); ok && exitErr.ExitStatus() == 2 {
-			return "", nil
-		}
-		return "", err
-	}
-	return strings.TrimSpace(output), nil
 }
 
 // RecreateSymlinkIfNeeded checks the LVDL policy and atomically recreates

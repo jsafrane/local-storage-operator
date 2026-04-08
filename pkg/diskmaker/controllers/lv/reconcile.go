@@ -549,7 +549,10 @@ func (r *LocalVolumeReconciler) processNewSymlink(ctx context.Context, scName st
 	diskLocation.SymlinkSource = source
 	diskLocation.SymlinkPath = target
 
-	currentDevice, found := r.pvLinkCache.GetCurrentDeviceInfo(source)
+	currentDevice, found, err := r.pvLinkCache.FindStalePVs(source, diskLocation.BlockDevice)
+	if err != nil {
+		return false, err
+	}
 	if found {
 		klog.V(4).Infof("found a dangling symlink for device %s and target %s", source, target)
 		newSymlinkTarget, err := currentDevice.GetSymlinkTargetPath(ctx, symLinkDirPath, source, r.Client)

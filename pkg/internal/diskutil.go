@@ -12,6 +12,7 @@ import (
 
 	"github.com/pkg/errors"
 	"golang.org/x/sys/unix"
+	"k8s.io/apimachinery/pkg/util/sets"
 	utilexec "k8s.io/utils/exec"
 )
 
@@ -228,6 +229,49 @@ func (b *BlockDevice) GetUncachedPathID() (string, error) {
 	}
 	// return path by label and error
 	return "", IDPathNotFoundError{DeviceName: b.KName}
+}
+
+// GetValidByIDSymlinks returns all /dev/disk/by-id/ symlinks that resolve to
+// the same underlying device as this BlockDevice (matched by KName).
+func (b *BlockDevice) GetValidByIDSymlinks() ([]string, error) {
+	paths, err := FilePathGlob(DiskByIDDir + "*")
+	if err != nil {
+		return nil, err
+	}
+
+	matches := sets.New[string]()
+
+	for _, path := range paths {
+		isMatch, err := PathEvalsToDiskLabel(path, b.KName)
+		if err != nil {
+			return nil, err
+		}
+		if isMatch {
+			matches.Insert(path)
+		}
+	}
+
+	return sets.List(matches), nil
+}
+
+// GetFilesystemUUID returns the filesystem UUID of the block device by
+// running blkid. Returns an empty string if the device has no filesystem.
+func (b *BlockDevice) GetFilesystemUUID() (string, error) {
+	devicePath, err := b.GetDevPath()
+	if err != nil {
+		return "", fmt.Errorf("failed to get /dev path for %s: %w", b.Name, err)
+	}
+	klog.InfoS("trying to get filesystem information", "devicePath", devicePath)
+	cmd := CmdExecutor.Command("blkid", "-s", "UUID", "-o", "value", devicePath)
+	output, err := executeCmdWithCombinedOutput(cmd)
+	if err != nil {
+		// blkid returns 2 when no UUID is found for the device.
+		if exitErr, ok := err.(utilexec.ExitError); ok && exitErr.ExitStatus() == 2 {
+			return "", nil
+		}
+		return "", err
+	}
+	return strings.TrimSpace(output), nil
 }
 
 func (b *BlockDevice) findDeviceInSortedSymlink(allDisks []string) (string, error) {

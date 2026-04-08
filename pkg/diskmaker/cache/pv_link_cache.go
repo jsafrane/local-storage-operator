@@ -3,6 +3,7 @@ package cache
 import (
 	"context"
 	"fmt"
+	"maps"
 	"path/filepath"
 	"slices"
 	"sync"
@@ -27,13 +28,14 @@ type LocalVolumeDeviceLinkCache struct {
 	client client.Client
 	mgr    manager.Manager
 
-	synced           chan struct{}
+	synced chan struct{}
+	// map of symlinkName in /dev/disk/byid and CurrentBlockDeviceInfo
 	localDeviceInfos map[string]CurrentBlockDeviceInfo
 }
 
 type CurrentBlockDeviceInfo struct {
-	lvdls       map[string]*v1.LocalVolumeDeviceLink
-	blockDevice internal.BlockDevice
+	// map of lvdlname and LocalVolumeDeviceLink
+	lvdls map[string]*v1.LocalVolumeDeviceLink
 }
 
 // GetSymlinkTargetPath returns a symlinkPath in /mnt/local-storage for Local volumes.
@@ -84,15 +86,17 @@ func (c CurrentBlockDeviceInfo) GetSymlinkTargetPath(ctx context.Context, symlin
 		return "", fmt.Errorf("currentSymlink %s still resolves to %s for %s", currentLinkTarget, resolvedCurrent, newSymlinkSourcePath)
 	}
 
+	if pv.Spec.Local == nil || pv.Spec.Local.Path == "" {
+		return "", fmt.Errorf("pv %s has empty local path", pv.Name)
+	}
+	currentTargetPath := pv.Spec.Local.Path
+	symlinkBaseName := filepath.Base(currentTargetPath)
+
 	if slices.Contains(validLinkTargets, newSymlinkSourcePath) {
-		if pv.Spec.Local == nil || pv.Spec.Local.Path == "" {
-			return "", fmt.Errorf("pv %s has empty local path", pv.Name)
-		}
-		currentTargetPath := pv.Spec.Local.Path
-		symlinkBaseName := filepath.Base(currentTargetPath)
 		return filepath.Join(symlinkDir, symlinkBaseName), nil
 	}
-	return "", fmt.Errorf("symlink source %s is not a valid symlink target", newSymlinkSourcePath)
+	klog.Warningf("symlink source %s is not recorded in valid symlink target, but has stale PVs that use the device", newSymlinkSourcePath)
+	return filepath.Join(symlinkDir, symlinkBaseName), nil
 }
 
 func (c CurrentBlockDeviceInfo) getLVDLAndPV(ctx context.Context, client client.Client) (*v1.LocalVolumeDeviceLink, *corev1.PersistentVolume, error) {
@@ -183,11 +187,37 @@ func (l *LocalVolumeDeviceLinkCache) Start(ctx context.Context) error {
 	return nil
 }
 
-func (l *LocalVolumeDeviceLinkCache) GetCurrentDeviceInfo(symlinkName string) (CurrentBlockDeviceInfo, bool) {
+func (l *LocalVolumeDeviceLinkCache) FindStalePVs(symlink string, blockDevice internal.BlockDevice) (CurrentBlockDeviceInfo, bool, error) {
 	l.mu.RLock()
 	defer l.mu.RUnlock()
-	info, ok := l.localDeviceInfos[symlinkName]
-	return info, ok
+	info, ok := l.localDeviceInfos[symlink]
+	if ok {
+		cloned := CurrentBlockDeviceInfo{lvdls: make(map[string]*v1.LocalVolumeDeviceLink, len(info.lvdls))}
+		maps.Copy(cloned.lvdls, info.lvdls)
+		return cloned, true, nil
+	}
+
+	// we couldn't find a direct match using symlink, lets try to find LVDL using sibling symlinks
+	// that belong to same device.
+	validLinkTargets, err := blockDevice.GetValidByIDSymlinks()
+	if err != nil {
+		return info, false, fmt.Errorf("error listing valid symlinks in %s for finding stale pvs for device %s: %w", internal.DiskByIDDir, blockDevice.Name, err)
+	}
+
+	currentDeviceInfo := CurrentBlockDeviceInfo{
+		lvdls: map[string]*v1.LocalVolumeDeviceLink{},
+	}
+
+	for _, linkTarget := range validLinkTargets {
+		deviceInfo, ok := l.localDeviceInfos[linkTarget]
+		if ok {
+			maps.Copy(currentDeviceInfo.lvdls, deviceInfo.lvdls)
+		}
+	}
+	if len(currentDeviceInfo.lvdls) == 0 {
+		return currentDeviceInfo, false, nil
+	}
+	return currentDeviceInfo, true, nil
 }
 
 // SeedForTests inserts an LVDL entry into the in-memory map.
@@ -210,6 +240,30 @@ func (l *LocalVolumeDeviceLinkCache) addOrUpdateLVDL(lvdl *v1.LocalVolumeDeviceL
 	l.mu.Lock()
 	defer l.mu.Unlock()
 
+	// Build a set of the new valid targets for fast lookup.
+	newTargets := make(map[string]struct{}, len(lvdl.Status.ValidLinkTargets))
+	for _, t := range lvdl.Status.ValidLinkTargets {
+		newTargets[t] = struct{}{}
+	}
+
+	// Remove this LVDL from any existing entries whose keys are no longer
+	// in the new ValidLinkTargets (handles target changes across updates).
+	for symlink, deviceInfo := range l.localDeviceInfos {
+		if _, still := newTargets[symlink]; still {
+			continue
+		}
+		if _, has := deviceInfo.lvdls[lvdl.Name]; !has {
+			continue
+		}
+		delete(deviceInfo.lvdls, lvdl.Name)
+		if len(deviceInfo.lvdls) == 0 {
+			delete(l.localDeviceInfos, symlink)
+		} else {
+			l.localDeviceInfos[symlink] = deviceInfo
+		}
+	}
+
+	// Add/update the LVDL for each current target.
 	for _, linkTarget := range lvdl.Status.ValidLinkTargets {
 		deviceInfo, ok := l.localDeviceInfos[linkTarget]
 		if !ok {

@@ -384,11 +384,11 @@ func TestProvisionFromExistingPV(t *testing.T) {
 			expectCurrLink: "/dev/null",
 		},
 		{
-			name:           "proceeds without error when symlink is missing",
-			symlinkTarget:  "/dev/null",
-			removeSymlink:  true,
-			mockReadlink:   true,
-			expectCurrLink: "/dev/null",
+			name:            "returns error when symlink is missing",
+			symlinkTarget:   "/dev/null",
+			removeSymlink:   true,
+			mockReadlink:    true,
+			expectErrSubstr: "unable to resolve symlink",
 		},
 	}
 
@@ -451,6 +451,9 @@ func TestProvisionFromExistingPV(t *testing.T) {
 			if tc.mockReadlink {
 				internal.Readlink = func(path string) (string, error) {
 					if path == symlinkPath {
+						if tc.removeSymlink {
+							return "", os.ErrNotExist
+						}
 						return tc.symlinkTarget, nil
 					}
 					return origReadlink(path)
