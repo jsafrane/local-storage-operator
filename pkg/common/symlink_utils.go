@@ -9,7 +9,6 @@ import (
 	"path/filepath"
 	"syscall"
 
-	"github.com/openshift/local-storage-operator/pkg/diskmaker/cache"
 	"github.com/openshift/local-storage-operator/pkg/internal"
 	corev1 "k8s.io/api/core/v1"
 	"k8s.io/klog/v2"
@@ -196,7 +195,7 @@ func CleanupSymlinks(c client.Client, r *provCommon.RuntimeConfig, ownerLabels m
 	return nil
 }
 
-func HasExistingLocalVolumes(ctx context.Context, client client.Client, symlinkDir string, blockDevice internal.BlockDevice, pvLinkCache *cache.LocalVolumeDeviceLinkCache) (string, error) {
+func HasExistingLocalVolumes(ctx context.Context, client client.Client, symlinkDir string, blockDevice internal.BlockDevice, pvLinkCache *LocalVolumeDeviceLinkCache) (string, error) {
 	existingSymlink, err := GetSymlinkedForCurrentSC(symlinkDir, blockDevice.KName)
 	if err != nil {
 		klog.ErrorS(err, "error reading existing symlinks for device",

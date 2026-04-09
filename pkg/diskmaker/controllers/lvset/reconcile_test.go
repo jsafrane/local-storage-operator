@@ -11,7 +11,6 @@ import (
 	v1api "github.com/openshift/local-storage-operator/api/v1"
 	v1alphav1api "github.com/openshift/local-storage-operator/api/v1alpha1"
 	"github.com/openshift/local-storage-operator/pkg/common"
-	"github.com/openshift/local-storage-operator/pkg/diskmaker/cache"
 	"github.com/openshift/local-storage-operator/pkg/internal"
 	test "github.com/openshift/local-storage-operator/test/framework"
 	"github.com/stretchr/testify/assert"
@@ -101,6 +100,9 @@ func newFakeLocalVolumeSetReconciler(t *testing.T, objs ...runtime.Object) (*Loc
 		fakeVolUtil:   fakeVolUtil,
 	}
 
+	pvLinkCache := common.NewLocalVolumeDeviceLinkCache(fakeClient, nil)
+	pvLinkCache.MarkSyncedForTests()
+
 	lvsReconciler := NewLocalVolumeSetReconciler(
 		fakeClient,
 		fakeClient,
@@ -108,7 +110,7 @@ func newFakeLocalVolumeSetReconciler(t *testing.T, objs ...runtime.Object) (*Loc
 		fakeClock,
 		&provDeleter.CleanupStatusTracker{ProcTable: provDeleter.NewProcTable()},
 		runtimeConfig,
-		nil,
+		pvLinkCache,
 	)
 
 	return lvsReconciler, tc
@@ -273,7 +275,7 @@ func TestProcessNewSymlink(t *testing.T) {
 			}
 
 			r, ctx := newFakeLocalVolumeSetReconciler(t, objs...)
-			r.pvLinkCache = cache.NewLocalVolumeDeviceLinkCache(r.Client, nil)
+			r.pvLinkCache = common.NewLocalVolumeDeviceLinkCache(r.Client, nil)
 			r.nodeName = node.Name
 			r.runtimeConfig.Node = node
 			r.runtimeConfig.Name = common.GetProvisionedByValue(*node)
@@ -614,7 +616,7 @@ func TestProcessRejectedDevicesForDeviceLinks(t *testing.T) {
 				},
 				lvdl,
 			)
-			r.pvLinkCache = cache.NewLocalVolumeDeviceLinkCache(r.Client, nil)
+			r.pvLinkCache = common.NewLocalVolumeDeviceLinkCache(r.Client, nil)
 			r.nodeName = node.Name
 			r.runtimeConfig.Node = node
 			r.runtimeConfig.Namespace = testNamespace

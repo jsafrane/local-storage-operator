@@ -255,8 +255,8 @@ func TestCreatePV(t *testing.T) {
 				ClientReader:          r.ClientReader,
 				SymLinkPath:           tc.symlinkpath,
 				BlockDevice:           internal.BlockDevice{KName: filepath.Base(tc.deviceName)},
-
-				ExtraLabelsForPV: map[string]string{},
+				CacheWriter:           r.pvLinkCache,
+				ExtraLabelsForPV:      map[string]string{},
 			})
 			if tc.shouldErr {
 				assert.NotNil(t, err)
@@ -305,8 +305,8 @@ func TestCreatePV(t *testing.T) {
 				ClientReader:          r.ClientReader,
 				SymLinkPath:           tc.symlinkpath,
 				BlockDevice:           internal.BlockDevice{KName: filepath.Base(tc.deviceName)},
-
-				ExtraLabelsForPV: map[string]string{},
+				CacheWriter:           r.pvLinkCache,
+				ExtraLabelsForPV:      map[string]string{},
 			})
 			assert.Nil(t, err)
 
@@ -423,6 +423,7 @@ func TestCreateLocalPV_DeviceLinkArgOrder(t *testing.T) {
 		ClientReader:          r.ClientReader,
 		SymLinkPath:           symLinkPath,
 		BlockDevice:           internal.BlockDevice{KName: kName, PathByID: fakeByIDLink},
+		CacheWriter:           r.pvLinkCache,
 		ExtraLabelsForPV:      map[string]string{},
 	})
 	assert.NoError(t, err)
@@ -618,7 +619,7 @@ func TestCreateLocalPV_DeviceLinkLifecycle(t *testing.T) {
 					KName:    "null",
 					PathByID: fakeByIDLink,
 				},
-
+				CacheWriter:      r.pvLinkCache,
 				ExtraLabelsForPV: map[string]string{},
 				CurrentSymlink:   currentTarget,
 			})

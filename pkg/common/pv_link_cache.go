@@ -1,4 +1,4 @@
-package cache
+package common
 
 import (
 	"context"
@@ -218,6 +218,12 @@ func (l *LocalVolumeDeviceLinkCache) FindStalePVs(symlink string, blockDevice in
 		return currentDeviceInfo, false, nil
 	}
 	return currentDeviceInfo, true, nil
+}
+
+// AddOrUpdateLVDL updates the in-memory index immediately, enabling
+// write-through cache semantics when called after a successful API server write.
+func (l *LocalVolumeDeviceLinkCache) AddOrUpdateLVDL(lvdl *v1.LocalVolumeDeviceLink) {
+	l.addOrUpdateLVDL(lvdl)
 }
 
 // SeedForTests inserts an LVDL entry into the in-memory map.

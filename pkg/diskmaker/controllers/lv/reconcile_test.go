@@ -20,7 +20,6 @@ import (
 	localv1 "github.com/openshift/local-storage-operator/api/v1"
 	localv1alpha1 "github.com/openshift/local-storage-operator/api/v1alpha1"
 	"github.com/openshift/local-storage-operator/pkg/common"
-	diskmakerCache "github.com/openshift/local-storage-operator/pkg/diskmaker/cache"
 	"github.com/openshift/local-storage-operator/pkg/internal"
 	test "github.com/openshift/local-storage-operator/test/framework"
 	"github.com/openshift/local-storage-operator/test/framework/util"
@@ -1054,7 +1053,7 @@ func getFakeDiskMaker(t *testing.T, symlinkLocation string, objs ...runtime.Obje
 		fakeVolUtil:   fakeVolUtil,
 	}
 
-	pvLinkCache := diskmakerCache.NewLocalVolumeDeviceLinkCache(fakeClient, nil)
+	pvLinkCache := common.NewLocalVolumeDeviceLinkCache(fakeClient, nil)
 	pvLinkCache.MarkSyncedForTests()
 
 	lvReconciler := NewLocalVolumeReconciler(

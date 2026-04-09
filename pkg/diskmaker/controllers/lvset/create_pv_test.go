@@ -245,8 +245,8 @@ func TestCreatePV(t *testing.T) {
 				ClientReader:          r.ClientReader,
 				SymLinkPath:           tc.symlinkpath,
 				BlockDevice:           internal.BlockDevice{KName: filepath.Base(tc.deviceName)},
-
-				ExtraLabelsForPV: map[string]string{},
+				CacheWriter:           r.pvLinkCache,
+				ExtraLabelsForPV:      map[string]string{},
 			})
 			if tc.shouldErr {
 				assert.NotNil(t, err)
@@ -295,8 +295,8 @@ func TestCreatePV(t *testing.T) {
 				ClientReader:          r.ClientReader,
 				SymLinkPath:           tc.symlinkpath,
 				BlockDevice:           internal.BlockDevice{KName: filepath.Base(tc.deviceName)},
-
-				ExtraLabelsForPV: map[string]string{},
+				CacheWriter:           r.pvLinkCache,
+				ExtraLabelsForPV:      map[string]string{},
 			})
 			assert.Nil(t, err)
 		})
@@ -393,6 +393,7 @@ func TestCreatePV_SetsLVDLOwnerRefToLocalVolumeSet(t *testing.T) {
 		ClientReader:          r.ClientReader,
 		SymLinkPath:           symLinkPath,
 		BlockDevice:           internal.BlockDevice{KName: "device-ownerref"},
+		CacheWriter:           r.pvLinkCache,
 		ExtraLabelsForPV:      map[string]string{},
 	})
 	assert.NoError(t, err)

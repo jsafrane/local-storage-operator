@@ -1,4 +1,4 @@
-package internal
+package common
 
 import (
 	"context"
@@ -11,6 +11,7 @@ import (
 	operatorv1 "github.com/openshift/api/operator/v1"
 	v1 "github.com/openshift/local-storage-operator/api/v1"
 	v1alpha1 "github.com/openshift/local-storage-operator/api/v1alpha1"
+	"github.com/openshift/local-storage-operator/pkg/internal"
 	corev1 "k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/api/equality"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
@@ -35,13 +36,15 @@ type DeviceLinkHandler struct {
 	client       client.Client
 	clientReader client.Reader
 	recorder     record.EventRecorder
+	cacheWriter  *LocalVolumeDeviceLinkCache
 }
 
-func NewDeviceLinkHandler(client client.Client, clientReader client.Reader, recorder record.EventRecorder) *DeviceLinkHandler {
+func NewDeviceLinkHandler(client client.Client, clientReader client.Reader, recorder record.EventRecorder, cacheWriter *LocalVolumeDeviceLinkCache) *DeviceLinkHandler {
 	return &DeviceLinkHandler{
 		client:       client,
 		clientReader: clientReader,
 		recorder:     recorder,
+		cacheWriter:  cacheWriter,
 	}
 }
 
@@ -120,7 +123,7 @@ func isNilOwnerObject(ownerObj runtime.Object) bool {
 	return value.Kind() == reflect.Ptr && value.IsNil()
 }
 
-func (dl *DeviceLinkHandler) ApplyStatus(ctx context.Context, pvName, namespace string, blockDevice BlockDevice, ownerObj runtime.Object, currentSymlink string) (*v1.LocalVolumeDeviceLink, error) {
+func (dl *DeviceLinkHandler) ApplyStatus(ctx context.Context, pvName, namespace string, blockDevice internal.BlockDevice, ownerObj runtime.Object, currentSymlink string) (*v1.LocalVolumeDeviceLink, error) {
 	devicePath, err := blockDevice.GetDevPath()
 	if err != nil {
 		return nil, fmt.Errorf("failed to get /dev path for %s: %w", blockDevice.Name, err)
@@ -164,11 +167,14 @@ func (dl *DeviceLinkHandler) ApplyStatus(ctx context.Context, pvName, namespace 
 	}
 
 	err = dl.client.Status().Update(ctx, copyToUpdate)
+	if err == nil {
+		dl.cacheWriter.AddOrUpdateLVDL(copyToUpdate)
+	}
 
 	return copyToUpdate, err
 }
 
-func (dl *DeviceLinkHandler) setStatusSymlinks(lvdl *v1.LocalVolumeDeviceLink, blockDevice BlockDevice, preferredLinkTarget, currentSymlink string) (*v1.LocalVolumeDeviceLink, error) {
+func (dl *DeviceLinkHandler) setStatusSymlinks(lvdl *v1.LocalVolumeDeviceLink, blockDevice internal.BlockDevice, preferredLinkTarget, currentSymlink string) (*v1.LocalVolumeDeviceLink, error) {
 	devicePath, err := blockDevice.GetDevPath()
 	if err != nil {
 		return lvdl, fmt.Errorf("failed to get /dev path for %s: %w", blockDevice.Name, err)
@@ -177,9 +183,9 @@ func (dl *DeviceLinkHandler) setStatusSymlinks(lvdl *v1.LocalVolumeDeviceLink, b
 	if preferredLinkTarget == "" {
 		preferredLinkTarget, err = blockDevice.GetUncachedPathID()
 		if err != nil {
-			// IDPathNotFoundError means no by-id symlink exists for this device;
+			// internal.IDPathNotFoundError means no by-id symlink exists for this device;
 			// treat it as "no preferred symlink" rather than a hard error.
-			var idNotFound IDPathNotFoundError
+			var idNotFound internal.IDPathNotFoundError
 			if !errors.As(err, &idNotFound) {
 				return lvdl, fmt.Errorf("failed to get preferred device link for %s: %w", blockDevice.Name, err)
 			}
@@ -248,7 +254,7 @@ func (dl *DeviceLinkHandler) findOrCreateLVDL(ctx context.Context, pvName, names
 // symLinkPath is the full path under /mnt/local-storage/<storageClass>/<deviceName>.
 // Returns nil if no action is needed or action succeeded, error if action failed.
 // On error, it sets a failure OperatorCondition on the LVDL object.
-func (dl *DeviceLinkHandler) RecreateSymlinkIfNeeded(ctx context.Context, lvdl *v1.LocalVolumeDeviceLink, symLinkPath string, blockDevice BlockDevice) (*v1.LocalVolumeDeviceLink, error) {
+func (dl *DeviceLinkHandler) RecreateSymlinkIfNeeded(ctx context.Context, lvdl *v1.LocalVolumeDeviceLink, symLinkPath string, blockDevice internal.BlockDevice) (*v1.LocalVolumeDeviceLink, error) {
 	currentTarget := lvdl.Status.CurrentLinkTarget
 	preferredTarget, err := blockDevice.GetPathByID()
 	if err != nil {
@@ -261,7 +267,7 @@ func (dl *DeviceLinkHandler) RecreateSymlinkIfNeeded(ctx context.Context, lvdl *
 		"pvName", lvdl.Name, "currentTarget", currentTarget, "preferredTarget", preferredTarget)
 
 	// 8. Validate device identity: preferredTarget and currentTarget must resolve to the same device
-	resolvedPreferred, err := FilePathEvalSymLinks(preferredTarget)
+	resolvedPreferred, err := internal.FilePathEvalSymLinks(preferredTarget)
 	if err != nil {
 		msg := fmt.Sprintf("failed to eval preferred target %s: %v", preferredTarget, err)
 		condition := getCondition("EvalSymlinkFailed", msg, operatorv1.ConditionTrue)
@@ -269,7 +275,7 @@ func (dl *DeviceLinkHandler) RecreateSymlinkIfNeeded(ctx context.Context, lvdl *
 	}
 
 	symLinkDir := filepath.Dir(symLinkPath)
-	entries, err := FilePathGlob(symLinkDir + "/*")
+	entries, err := internal.FilePathGlob(symLinkDir + "/*")
 	if err != nil {
 		msg := fmt.Sprintf("failed to list symlink dir %s: %v", symLinkDir, err)
 		condition := getCondition("ListDirFailed", msg, operatorv1.ConditionTrue)
@@ -279,7 +285,7 @@ func (dl *DeviceLinkHandler) RecreateSymlinkIfNeeded(ctx context.Context, lvdl *
 		if entry == symLinkPath {
 			continue // this is the symlink we are replacing
 		}
-		resolvedEntry, err := FilePathEvalSymLinks(entry)
+		resolvedEntry, err := internal.FilePathEvalSymLinks(entry)
 		if err != nil {
 			continue // broken symlink — skip
 		}
@@ -327,6 +333,7 @@ func (dl *DeviceLinkHandler) RecreateSymlinkIfNeeded(ctx context.Context, lvdl *
 		klog.ErrorS(err, "error updating lvdl object", "lvdl", lvdl.Name)
 		return lvdl, fmt.Errorf("updating lvdl failed with: %w", err)
 	}
+	dl.cacheWriter.AddOrUpdateLVDL(copyToUpdate)
 	ownerObj, ownerErr := dl.resolveOwnerObjectFromLVDL(ctx, lvdl)
 	if ownerErr != nil {
 		klog.ErrorS(ownerErr, "unable to resolve owner object for symlink recreated event", "lvdl", lvdl.Name)
@@ -369,7 +376,7 @@ func (dl *DeviceLinkHandler) resolveOwnerObjectFromLVDL(ctx context.Context, lvd
 	}
 }
 
-func (dl *DeviceLinkHandler) updateStatus(ctx context.Context, lvdl *v1.LocalVolumeDeviceLink, condition operatorv1.OperatorCondition, blockDevice BlockDevice, preferredLinkTarget, currentSymlink string) (*v1.LocalVolumeDeviceLink, error) {
+func (dl *DeviceLinkHandler) updateStatus(ctx context.Context, lvdl *v1.LocalVolumeDeviceLink, condition operatorv1.OperatorCondition, blockDevice internal.BlockDevice, preferredLinkTarget, currentSymlink string) (*v1.LocalVolumeDeviceLink, error) {
 	copyToUpdate := lvdl.DeepCopy()
 	copyToUpdate, err := dl.setStatusSymlinks(copyToUpdate, blockDevice, preferredLinkTarget, currentSymlink)
 	if err != nil {
@@ -388,6 +395,7 @@ func (dl *DeviceLinkHandler) updateStatus(ctx context.Context, lvdl *v1.LocalVol
 		klog.ErrorS(err, "error updating lvdl object", "lvdl", lvdl.Name, "symlinkError", condition.Message)
 		return lvdl, fmt.Errorf("symlink recreation failed %s, setting conditions also failed with: %w", condition.Message, err)
 	}
+	dl.cacheWriter.AddOrUpdateLVDL(copyToUpdate)
 
 	return copyToUpdate, err
 }
@@ -419,7 +427,7 @@ func (dl *DeviceLinkHandler) setLVDLCondition(lvdl *v1.LocalVolumeDeviceLink, co
 	return lvdl
 }
 
-func HasMismatchingSymlink(lvdl *v1.LocalVolumeDeviceLink, blockDevice BlockDevice) bool {
+func HasMismatchingSymlink(lvdl *v1.LocalVolumeDeviceLink, blockDevice internal.BlockDevice) bool {
 	lvdlName := "<nil>"
 	if lvdl != nil {
 		lvdlName = lvdl.Name

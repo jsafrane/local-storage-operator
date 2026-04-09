@@ -11,7 +11,6 @@ import (
 	localv1alpha1 "github.com/openshift/local-storage-operator/api/v1alpha1"
 	"github.com/openshift/local-storage-operator/pkg/common"
 	"github.com/openshift/local-storage-operator/pkg/diskmaker"
-	"github.com/openshift/local-storage-operator/pkg/diskmaker/cache"
 	"github.com/openshift/local-storage-operator/pkg/internal"
 	"github.com/openshift/local-storage-operator/pkg/localmetrics"
 	corev1 "k8s.io/api/core/v1"
@@ -62,7 +61,7 @@ type LocalVolumeSetReconciler struct {
 	// map from KNAME of device to time when the device was first observed since the process started
 	deviceAgeMap *ageMap
 	// a cache of existing devices on the node
-	pvLinkCache *cache.LocalVolumeDeviceLinkCache
+	pvLinkCache *common.LocalVolumeDeviceLinkCache
 
 	// static-provisioner stuff
 	cleanupTracker *provDeleter.CleanupStatusTracker
@@ -70,7 +69,7 @@ type LocalVolumeSetReconciler struct {
 	deleter        *provDeleter.Deleter
 }
 
-func NewLocalVolumeSetReconciler(client client.Client, clientReader client.Reader, scheme *runtime.Scheme, time timeInterface, cleanupTracker *provDeleter.CleanupStatusTracker, rc *provCommon.RuntimeConfig, pvLinkCache *cache.LocalVolumeDeviceLinkCache) *LocalVolumeSetReconciler {
+func NewLocalVolumeSetReconciler(client client.Client, clientReader client.Reader, scheme *runtime.Scheme, time timeInterface, cleanupTracker *provDeleter.CleanupStatusTracker, rc *provCommon.RuntimeConfig, pvLinkCache *common.LocalVolumeDeviceLinkCache) *LocalVolumeSetReconciler {
 	deleter := provDeleter.NewDeleter(rc, cleanupTracker)
 	eventReporter := newEventReporter(rc.Recorder)
 	lvsReconciler := &LocalVolumeSetReconciler{
@@ -153,7 +152,7 @@ func (r *LocalVolumeSetReconciler) Reconcile(ctx context.Context, request ctrl.R
 
 	// Wait for the LVDL cache to finish its initial sync before doing any
 	// real work. Requeue quickly so we start as soon as the cache is ready.
-	if r.pvLinkCache != nil && !r.pvLinkCache.IsSynced() {
+	if !r.pvLinkCache.IsSynced() {
 		klog.InfoS("LVDL cache not yet synced, requeueing", "namespace", request.Namespace, "name", request.Name)
 		return ctrl.Result{RequeueAfter: fastRequeueTime}, nil
 	}
@@ -355,7 +354,7 @@ func (r *LocalVolumeSetReconciler) processRejectedDevicesForDeviceLinks(ctx cont
 		targetBaseSymlinkName := filepath.Base(symlinkPath)
 
 		lvdlName := common.GeneratePVName(targetBaseSymlinkName, r.runtimeConfig.Node.Name, storageClassName)
-		deviceHandler := internal.NewDeviceLinkHandler(r.Client, r.ClientReader, r.runtimeConfig.Recorder)
+		deviceHandler := common.NewDeviceLinkHandler(r.Client, r.ClientReader, r.runtimeConfig.Recorder, r.pvLinkCache)
 
 		lvdl, err := deviceHandler.FindLVDL(ctx, lvdlName, r.runtimeConfig.Namespace)
 		if err != nil && !kerrors.IsNotFound(err) {
@@ -364,7 +363,7 @@ func (r *LocalVolumeSetReconciler) processRejectedDevicesForDeviceLinks(ctx cont
 		}
 
 		var lvdlError error
-		if internal.HasMismatchingSymlink(lvdl, blockDevice) {
+		if common.HasMismatchingSymlink(lvdl, blockDevice) {
 			// Also attempt symlink recreation for in-use devices with PreferredLinkTarget policy.
 			_, lvdlError = deviceHandler.RecreateSymlinkIfNeeded(ctx, lvdl, symlinkPath, blockDevice)
 		} else {
@@ -643,6 +642,7 @@ func (r *LocalVolumeSetReconciler) provisionPV(
 		ExtraLabelsForPV:      map[string]string{},
 		CurrentSymlink:        symlinkSourcePath,
 		BlockDevice:           dev,
+		CacheWriter:           r.pvLinkCache,
 	}
 
 	defer unlockFunc()
@@ -711,6 +711,7 @@ func (r *LocalVolumeSetReconciler) provisionFromExistingPV(
 		ExtraLabelsForPV:      map[string]string{},
 		CurrentSymlink:        effectiveCurrentSource,
 		BlockDevice:           blockDevice,
+		CacheWriter:           r.pvLinkCache,
 	}
 	return common.CreateLocalPV(ctx, createLocalPVArgs)
 }

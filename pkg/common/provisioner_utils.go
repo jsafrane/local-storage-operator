@@ -66,6 +66,8 @@ type CreateLocalPVArgs struct {
 	CurrentSymlink string
 	// BlockDevice is the block device backing this PV.
 	BlockDevice internal.BlockDevice
+	// CacheWriter enables write-through updates to the LVDL in-memory cache.
+	CacheWriter *LocalVolumeDeviceLinkCache
 }
 
 // CreateLocalPV is used to create a local PV against a symlink
@@ -116,7 +118,7 @@ func CreateLocalPV(ctx context.Context, args CreateLocalPVArgs) error {
 		return fmt.Errorf("name: %q, namespace: %q, or  kind: %q is empty for obj: %+v", name, namespace, kind, obj)
 	}
 
-	deviceHandler := internal.NewDeviceLinkHandler(client, args.ClientReader, args.RuntimeConfig.Recorder)
+	deviceHandler := NewDeviceLinkHandler(client, args.ClientReader, args.RuntimeConfig.Recorder, args.CacheWriter)
 	klog.V(4).Infof("finding lvdl %s %s", pvName, namespace)
 	lvdl, err := deviceHandler.FindLVDL(ctx, pvName, namespace)
 	if err != nil && !apierrors.IsNotFound(err) {
@@ -127,7 +129,7 @@ func CreateLocalPV(ctx context.Context, args CreateLocalPVArgs) error {
 	// Symlink recreation must happen before PV creation because it fixes the
 	// symlink that the PV will reference. RecreateSymlinkIfNeeded already
 	// updates the LVDL status, so we skip ApplyStatus later.
-	requiresSymlinkRecreation := internal.HasMismatchingSymlink(lvdl, args.BlockDevice)
+	requiresSymlinkRecreation := HasMismatchingSymlink(lvdl, args.BlockDevice)
 	if requiresSymlinkRecreation {
 		if _, err := deviceHandler.RecreateSymlinkIfNeeded(ctx, lvdl, symLinkPath, args.BlockDevice); err != nil {
 			return fmt.Errorf("error recreating symlink: %w", err)
