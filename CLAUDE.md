@@ -143,6 +143,15 @@ Test framework in `test/framework/` provides utilities for:
 - Resource creation and cleanup
 - Volume management operations
 
+## Code Formatting
+
+After editing any Go file, always run formatting and import fixes before finishing:
+```bash
+gopls format -w <file1> <file2> ...
+# gopls imports only accepts one file at a time
+gopls imports -w <file>
+```
+
 ## Common Patterns
 
 - Controllers use controller-runtime framework with reconciliation loops

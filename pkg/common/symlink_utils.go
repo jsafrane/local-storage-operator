@@ -22,7 +22,7 @@ import (
 // `target`: the path in the symlinkdir to symlink to. device-id if it exists, KNAME if it doesn't
 // `idExists`: is set if the device-id exists
 // `err`
-func GetSymLinkSourceAndTarget(dev internal.BlockDevice, symlinkDir, existingSymlink string) (string, string, bool, error) {
+func GetSymLinkSourceAndTarget(dev internal.BlockDevice, symlinkDir string) (string, string, bool, error) {
 	var source string
 	var target string
 	var idExists = true
@@ -33,8 +33,7 @@ func GetSymLinkSourceAndTarget(dev internal.BlockDevice, symlinkDir, existingSym
 	if err != nil {
 		return source, target, false, err
 	}
-	// determine symlink source
-	source, err = dev.GetPathByID(existingSymlink)
+	source, err = dev.GetPathByID()
 	if errors.As(err, &internal.IDPathNotFoundError{}) {
 		// no disk-by-id
 		idExists = false
@@ -47,14 +46,14 @@ func GetSymLinkSourceAndTarget(dev internal.BlockDevice, symlinkDir, existingSym
 
 }
 
-func GetSymlinkedForCurrentSC(symlinkDir string, currentDevice internal.BlockDevice) (string, error) {
+func GetSymlinkedForCurrentSC(symlinkDir string, kname string) (string, error) {
 	paths, err := filepath.Glob(filepath.Join(symlinkDir, "*"))
 	if err != nil {
 		return "", err
 	}
 
 	for _, path := range paths {
-		isMatch, err := internal.PathEvalsToDiskLabel(path, currentDevice.KName)
+		isMatch, err := internal.PathEvalsToDiskLabel(path, kname)
 		if err != nil {
 			return "", err
 		}
@@ -194,4 +193,35 @@ func CleanupSymlinks(c client.Client, r *provCommon.RuntimeConfig, ownerLabels m
 		}
 	}
 	return nil
+}
+
+func HasExistingLocalVolumes(ctx context.Context, client client.Client, symlinkDir string, blockDevice internal.BlockDevice, pvLinkCache *LocalVolumeDeviceLinkCache) (string, error) {
+	existingSymlink, err := GetSymlinkedForCurrentSC(symlinkDir, blockDevice.KName)
+	if err != nil {
+		klog.ErrorS(err, "error reading existing symlinks for device",
+			"blockDevice", blockDevice.Name)
+		return "", err
+	}
+
+	if existingSymlink != "" {
+		return filepath.Join(symlinkDir, existingSymlink), nil
+	}
+
+	symlinkSource, err := blockDevice.GetPathByID()
+	if err != nil {
+		return "", err
+	}
+
+	currentDevice, found, err := pvLinkCache.FindStalePVs(symlinkSource, blockDevice)
+	if err != nil {
+		return "", err
+	}
+	if found {
+		newSymlinkTarget, err := currentDevice.GetSymlinkTargetPath(ctx, symlinkDir, symlinkSource, client)
+		if err != nil {
+			return "", err
+		}
+		return newSymlinkTarget, nil
+	}
+	return "", nil
 }

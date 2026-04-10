@@ -1,0 +1,355 @@
+package common
+
+import (
+	"context"
+	"fmt"
+	"os"
+	"path/filepath"
+	"testing"
+
+	v1api "github.com/openshift/local-storage-operator/api/v1"
+	"github.com/openshift/local-storage-operator/pkg/internal"
+	"github.com/stretchr/testify/assert"
+	corev1 "k8s.io/api/core/v1"
+	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/apimachinery/pkg/runtime"
+	"sigs.k8s.io/controller-runtime/pkg/client"
+	"sigs.k8s.io/controller-runtime/pkg/client/fake"
+)
+
+func TestCurrentBlockDeviceInfoGetSymlinkTargetPath(t *testing.T) {
+	const (
+		symlinkDir = "/mnt/local-storage/sc-a"
+		sourcePath = "/dev/disk/by-id/wwn-1234"
+	)
+
+	tests := []struct {
+		name            string
+		setup           func(t *testing.T, c *LocalVolumeDeviceLinkCache) (CurrentBlockDeviceInfo, string)
+		symlinkEvalFunc func(path string) (string, error)
+		wantPath        string
+		wantErr         string
+	}{
+		{
+			name: "errors when more than one LVDL maps source",
+			setup: func(t *testing.T, c *LocalVolumeDeviceLinkCache) (CurrentBlockDeviceInfo, string) {
+				lvdl1 := newCacheLVDL("pv-a", "/tmp/current-a", v1api.DeviceLinkPolicyPreferredLinkTarget, sourcePath)
+				lvdl2 := newCacheLVDL("pv-b", "/tmp/current-b", v1api.DeviceLinkPolicyPreferredLinkTarget, sourcePath)
+				c.addOrUpdateLVDL(lvdl1)
+				c.addOrUpdateLVDL(lvdl2)
+				info := c.localDeviceInfos[sourcePath]
+				return info, sourcePath
+			},
+			wantErr: "more than one LocalVolumeDevicelink found",
+		},
+		{
+			name: "errors when lvdl set is unexpectedly empty",
+			setup: func(t *testing.T, c *LocalVolumeDeviceLinkCache) (CurrentBlockDeviceInfo, string) {
+				lvdl := newCacheLVDL("pv-empty", "/tmp/current-empty", v1api.DeviceLinkPolicyPreferredLinkTarget, sourcePath)
+				c.addOrUpdateLVDL(lvdl)
+				info := c.localDeviceInfos[sourcePath]
+				c.removeLVDL(lvdl)
+				return info, sourcePath
+			},
+			wantErr: "unexpected empty lvdl set",
+		},
+		{
+			name: "errors when policy is not preferred link target",
+			setup: func(t *testing.T, c *LocalVolumeDeviceLinkCache) (CurrentBlockDeviceInfo, string) {
+				lvdl := newCacheLVDL("pv-none", "/tmp/current-none", v1api.DeviceLinkPolicyNone, sourcePath)
+				c.addOrUpdateLVDL(lvdl)
+				info := c.localDeviceInfos[sourcePath]
+				return info, sourcePath
+			},
+			wantErr: "found stale symlink link",
+		},
+		{
+			name: "errors when current link still resolves",
+			setup: func(t *testing.T, c *LocalVolumeDeviceLinkCache) (CurrentBlockDeviceInfo, string) {
+				lvdl := newCacheLVDL("pv-resolves", "/tmp/current-resolves", v1api.DeviceLinkPolicyPreferredLinkTarget, sourcePath)
+				c.addOrUpdateLVDL(lvdl)
+				info := c.localDeviceInfos[sourcePath]
+				return info, sourcePath
+			},
+			symlinkEvalFunc: func(path string) (string, error) {
+				if path == "/tmp/current-resolves" {
+					return "/dev/sda", nil
+				}
+				return "", os.ErrNotExist
+			},
+			wantErr: "currentSymlink /tmp/current-resolves still resolves",
+		},
+		{
+			name: "returns recomputed symlink path when preferred policy and unresolved current",
+			setup: func(t *testing.T, c *LocalVolumeDeviceLinkCache) (CurrentBlockDeviceInfo, string) {
+				lvdl := newCacheLVDL("pv-success", "/dev/disk/by-id/yyy", v1api.DeviceLinkPolicyPreferredLinkTarget, sourcePath)
+				c.addOrUpdateLVDL(lvdl)
+				info := c.localDeviceInfos[sourcePath]
+				return info, sourcePath
+			},
+			symlinkEvalFunc: func(path string) (string, error) {
+				return "", os.ErrNotExist
+			},
+			// old behavior derived basename from currentLinkTarget ("yyy"), but we must derive
+			// the final symlink name from the PV local path ("xxx").
+			wantPath: filepath.Join(symlinkDir, "xxx"),
+		},
+		{
+			name: "returns symlink path with warning when source is not in validLinkTargets",
+			setup: func(t *testing.T, c *LocalVolumeDeviceLinkCache) (CurrentBlockDeviceInfo, string) {
+				lvdl := newCacheLVDL("pv-invalid-target", "/tmp/current-invalid", v1api.DeviceLinkPolicyPreferredLinkTarget, "/dev/disk/by-id/wwn-other")
+				c.addOrUpdateLVDL(lvdl)
+				return c.localDeviceInfos["/dev/disk/by-id/wwn-other"], sourcePath
+			},
+			symlinkEvalFunc: func(path string) (string, error) {
+				return "", os.ErrNotExist
+			},
+			wantPath: filepath.Join(symlinkDir, "current-invalid"),
+		},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			origEval := internal.FilePathEvalSymLinks
+			t.Cleanup(func() {
+				internal.FilePathEvalSymLinks = origEval
+			})
+
+			if tc.symlinkEvalFunc != nil {
+				internal.FilePathEvalSymLinks = tc.symlinkEvalFunc
+			} else {
+				internal.FilePathEvalSymLinks = func(path string) (string, error) {
+					return "", os.ErrNotExist
+				}
+			}
+
+			cache := NewLocalVolumeDeviceLinkCache(nil, nil)
+			info, source := tc.setup(t, cache)
+			fakeClient := fakeClientForInfo(t, info)
+
+			gotPath, err := info.GetSymlinkTargetPath(context.TODO(), symlinkDir, source, fakeClient)
+
+			if tc.wantErr != "" {
+				assert.ErrorContains(t, err, tc.wantErr)
+				assert.Empty(t, gotPath)
+				return
+			}
+
+			assert.NoError(t, err)
+			assert.Equal(t, tc.wantPath, gotPath)
+		})
+	}
+}
+
+func TestFindStalePVs(t *testing.T) {
+	const (
+		directSymlink  = "/dev/disk/by-id/wwn-direct"
+		siblingSymlink = "/dev/disk/by-id/scsi-sibling"
+		unknownSymlink = "/dev/disk/by-id/wwn-unknown"
+	)
+
+	tests := []struct {
+		name string
+		// symlink is the primary key passed to FindStalePVs
+		symlink string
+		// seededLVDLs are pre-populated into the cache
+		seededLVDLs []*v1api.LocalVolumeDeviceLink
+		// filePathGlob mocks the /dev/disk/by-id/ listing
+		filePathGlob func(pattern string) ([]string, error)
+		// filePathEvalSymLinks mocks symlink resolution
+		filePathEvalSymLinks func(path string) (string, error)
+		// blockDevice is the device passed to FindStalePVs
+		blockDevice internal.BlockDevice
+		wantFound   bool
+		wantErr     string
+		// wantLVDLNames are the expected LVDL names in the result
+		wantLVDLNames []string
+	}{
+		{
+			name:    "direct match by symlink name",
+			symlink: directSymlink,
+			seededLVDLs: []*v1api.LocalVolumeDeviceLink{
+				newCacheLVDL("pv-direct", "/dev/disk/by-id/old-gone", v1api.DeviceLinkPolicyPreferredLinkTarget, directSymlink),
+			},
+			blockDevice: internal.BlockDevice{Name: "sda", KName: "sda"},
+			// No glob/eval needed — direct match short-circuits
+			wantFound:     true,
+			wantLVDLNames: []string{"pv-direct"},
+		},
+		{
+			name:    "fallback match via sibling by-id symlink",
+			symlink: unknownSymlink,
+			seededLVDLs: []*v1api.LocalVolumeDeviceLink{
+				// LVDL was recorded with siblingSymlink, not unknownSymlink
+				newCacheLVDL("pv-sibling", "/dev/disk/by-id/old-gone", v1api.DeviceLinkPolicyPreferredLinkTarget, siblingSymlink),
+			},
+			blockDevice: internal.BlockDevice{Name: "sdb", KName: "sdb"},
+			filePathGlob: func(pattern string) ([]string, error) {
+				return []string{unknownSymlink, siblingSymlink}, nil
+			},
+			filePathEvalSymLinks: func(path string) (string, error) {
+				// both symlinks resolve to the same device
+				if path == unknownSymlink || path == siblingSymlink {
+					return "/dev/sdb", nil
+				}
+				return "", os.ErrNotExist
+			},
+			wantFound:     true,
+			wantLVDLNames: []string{"pv-sibling"},
+		},
+		{
+			name:        "no match when device has no cached LVDL",
+			symlink:     unknownSymlink,
+			blockDevice: internal.BlockDevice{Name: "sdc", KName: "sdc"},
+			filePathGlob: func(pattern string) ([]string, error) {
+				return []string{unknownSymlink}, nil
+			},
+			filePathEvalSymLinks: func(path string) (string, error) {
+				if path == unknownSymlink {
+					return "/dev/sdc", nil
+				}
+				return "", os.ErrNotExist
+			},
+			wantFound: false,
+		},
+		{
+			name:        "error when GetValidByIDSymlinks fails",
+			symlink:     unknownSymlink,
+			blockDevice: internal.BlockDevice{Name: "sdd", KName: "sdd"},
+			filePathGlob: func(pattern string) ([]string, error) {
+				return nil, fmt.Errorf("permission denied")
+			},
+			wantErr: "error listing valid symlinks",
+		},
+		{
+			name:    "merges LVDLs from multiple sibling symlinks",
+			symlink: unknownSymlink,
+			seededLVDLs: []*v1api.LocalVolumeDeviceLink{
+				newCacheLVDL("pv-link-a", "/dev/disk/by-id/old-a", v1api.DeviceLinkPolicyPreferredLinkTarget, directSymlink),
+				newCacheLVDL("pv-link-b", "/dev/disk/by-id/old-b", v1api.DeviceLinkPolicyPreferredLinkTarget, siblingSymlink),
+			},
+			blockDevice: internal.BlockDevice{Name: "sde", KName: "sde"},
+			filePathGlob: func(pattern string) ([]string, error) {
+				return []string{directSymlink, siblingSymlink, unknownSymlink}, nil
+			},
+			filePathEvalSymLinks: func(path string) (string, error) {
+				// all three symlinks resolve to the same device
+				return "/dev/sde", nil
+			},
+			wantFound:     true,
+			wantLVDLNames: []string{"pv-link-a", "pv-link-b"},
+		},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			origGlob := internal.FilePathGlob
+			origEval := internal.FilePathEvalSymLinks
+			t.Cleanup(func() {
+				internal.FilePathGlob = origGlob
+				internal.FilePathEvalSymLinks = origEval
+			})
+
+			if tc.filePathGlob != nil {
+				internal.FilePathGlob = tc.filePathGlob
+			}
+			if tc.filePathEvalSymLinks != nil {
+				internal.FilePathEvalSymLinks = tc.filePathEvalSymLinks
+			}
+
+			c := NewLocalVolumeDeviceLinkCache(nil, nil)
+			for _, lvdl := range tc.seededLVDLs {
+				c.addOrUpdateLVDL(lvdl)
+			}
+
+			info, found, err := c.FindStalePVs(tc.symlink, tc.blockDevice)
+
+			if tc.wantErr != "" {
+				assert.ErrorContains(t, err, tc.wantErr)
+				return
+			}
+
+			assert.NoError(t, err)
+			assert.Equal(t, tc.wantFound, found, "found mismatch")
+
+			if !tc.wantFound {
+				assert.Empty(t, info.lvdls)
+				return
+			}
+
+			gotNames := make([]string, 0, len(info.lvdls))
+			for name := range info.lvdls {
+				gotNames = append(gotNames, name)
+			}
+			assert.ElementsMatch(t, tc.wantLVDLNames, gotNames)
+		})
+	}
+}
+
+func TestAddOrUpdateLVDL_RemovesStaleTargets(t *testing.T) {
+	c := NewLocalVolumeDeviceLinkCache(nil, nil)
+
+	// Seed with targets A and B.
+	lvdl := newCacheLVDL("pv-1", "/old", v1api.DeviceLinkPolicyPreferredLinkTarget, "/dev/disk/by-id/A", "/dev/disk/by-id/B")
+	c.addOrUpdateLVDL(lvdl)
+
+	// Verify both entries exist.
+	_, okA := c.localDeviceInfos["/dev/disk/by-id/A"]
+	_, okB := c.localDeviceInfos["/dev/disk/by-id/B"]
+	assert.True(t, okA, "expected entry for target A")
+	assert.True(t, okB, "expected entry for target B")
+
+	// Update the same LVDL so ValidLinkTargets changes from [A, B] to [A, C].
+	lvdlUpdated := newCacheLVDL("pv-1", "/new", v1api.DeviceLinkPolicyPreferredLinkTarget, "/dev/disk/by-id/A", "/dev/disk/by-id/C")
+	c.addOrUpdateLVDL(lvdlUpdated)
+
+	// A should still exist, B should be gone, C should be added.
+	_, okA = c.localDeviceInfos["/dev/disk/by-id/A"]
+	_, okB = c.localDeviceInfos["/dev/disk/by-id/B"]
+	_, okC := c.localDeviceInfos["/dev/disk/by-id/C"]
+	assert.True(t, okA, "expected entry for target A to remain")
+	assert.False(t, okB, "expected stale entry for target B to be removed")
+	assert.True(t, okC, "expected entry for target C to be added")
+
+	// Verify the LVDL pointer was updated in existing entries.
+	assert.Equal(t, "/new", c.localDeviceInfos["/dev/disk/by-id/A"].lvdls["pv-1"].Status.CurrentLinkTarget)
+}
+
+func newCacheLVDL(name, current string, policy v1api.DeviceLinkPolicy, validTargets ...string) *v1api.LocalVolumeDeviceLink {
+	return &v1api.LocalVolumeDeviceLink{
+		ObjectMeta: metav1.ObjectMeta{
+			Name: name,
+		},
+		Spec: v1api.LocalVolumeDeviceLinkSpec{
+			PersistentVolumeName: name,
+			Policy:               policy,
+		},
+		Status: v1api.LocalVolumeDeviceLinkStatus{
+			CurrentLinkTarget: current,
+			ValidLinkTargets:  validTargets,
+		},
+	}
+}
+
+func fakeClientForInfo(t *testing.T, info CurrentBlockDeviceInfo) client.Client {
+	t.Helper()
+	scheme := runtime.NewScheme()
+	assert.NoError(t, corev1.AddToScheme(scheme))
+
+	objects := make([]client.Object, 0, len(info.lvdls))
+	for name, lvdl := range info.lvdls {
+		localPath := filepath.Join("/mnt/local-storage/sc-a", filepath.Base(lvdl.Status.CurrentLinkTarget))
+		if name == "pv-success" {
+			localPath = "/mnt/local-storage/sc-a/xxx"
+		}
+		objects = append(objects, &corev1.PersistentVolume{
+			ObjectMeta: metav1.ObjectMeta{Name: name},
+			Spec: corev1.PersistentVolumeSpec{
+				PersistentVolumeSource: corev1.PersistentVolumeSource{
+					Local: &corev1.LocalVolumeSource{Path: localPath},
+				},
+			},
+		})
+	}
+	return fake.NewClientBuilder().WithScheme(scheme).WithObjects(objects...).Build()
+}
