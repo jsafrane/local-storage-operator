@@ -66,7 +66,7 @@ func TestCurrentBlockDeviceInfoGetSymlinkTargetPath(t *testing.T) {
 				info := c.localDeviceInfos[sourcePath]
 				return info, sourcePath
 			},
-			wantErr: "found stale symlink link",
+			wantErr: "policy is not PreferredLinkTarget",
 		},
 		{
 			name: "errors when current link still resolves",
