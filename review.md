@@ -15,7 +15,7 @@ I recorded everything that I found strange or confusing. Most of the remarks wer
     * In addition, the `currentDeviceInfo` is [constantly being overwritten](https://github.com/jsafrane/local-storage-operator/blob/3e6dd4bf8d8e123747d62c8cfbca3725b59044c5/pkg/common/pv_link_cache.go#L246-L247). Why?
 
 2. `processRejectedDevicesForDeviceLinks()` calls `HasExistingLocalVolumes()`, which calls `LocalVolumeDeviceLinkCache.FindStalePVs()`
-   `FindStalePVs()` does not find any PVs, as the name would suggest. It find LVDLs for a given device and its symlinks. And what "stale" means there? There does not seem to be anything stale in the LVDLs.
+   * `FindStalePVs()` does not find any PVs, as the name would suggest. It find LVDLs for a given device and its symlinks. And what "stale" means there? There does not seem to be anything stale in the LVDLs.
 
 4. `processRejectedDevicesForDeviceLinks` calls `HasExistingLocalVolumes`, which calls `GetSymlinkTargetPath`
     * I think we call the path in `/mnt/local-storage/<sc>/foo` as `symlinkPath`. Why is it called `TargetPath` here?
